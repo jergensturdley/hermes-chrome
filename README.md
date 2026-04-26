@@ -1,51 +1,58 @@
 # Hermes Chrome
 
-Chrome side panel for a local Hermes Agent gateway.
+Hermes Chrome is a side panel for talking to a local Hermes Agent gateway without leaving the page you are on.
 
-## Features
+![Hermes Chrome side panel](docs/sidepanel-preview.png)
 
-- Chat with Hermes from Chrome's side panel
-- Auto-detect a local gateway
-- Optional page context: title, URL, language, and visible text excerpt
-- Hermes session API support, so conversations can appear in Hermes session history
+It gives Hermes a browser-native front end: open the panel, ask a question, optionally include page context, and keep the conversation tied to your local runtime.
+
+## Highlights
+
+- Side panel chat that stays available while you browse
+- Local gateway detection and connection testing
+- Optional page-aware prompts using title, URL, language, and visible text
+- Hermes session API support so conversations can live in Hermes history
 - Runtime controls for provider, model, and base URL
-- Slash command palette with keyboard and mouse navigation
-- Local storage only; no analytics or remote services
+- Slash command palette for faster prompting
+- Local storage only, with no bundled analytics
 
-## Install
+## Quick start
 
 1. Open `chrome://extensions`.
 2. Enable Developer mode.
-3. Click **Load unpacked**.
-4. Select this folder.
-5. Click the Hermes toolbar icon to open the side panel.
+3. Click **Load unpacked** and select this folder.
+4. Open the Hermes side panel from the toolbar icon.
+5. If Hermes is not on the default gateway, open settings and run **Auto-detect Gateway** or enter the URL manually.
+6. Use **Test Connection** before starting a chat.
+
+The default gateway is `http://127.0.0.1:8642`.
 
 ## Settings
 
-Open settings from the gear button in the side panel.
-
-- **Gateway URL**: defaults to `http://127.0.0.1:8642`
-- **API key**: optional; only needed if Hermes was started with `API_SERVER_KEY`
-- **Provider / model / base URL**: loaded from Hermes and can be applied back to Hermes
-- **Use Hermes session API**: recommended; keeps chat state in Hermes sessions
-- **Include page context**: sends browser page context with each message
+- **Gateway URL**: Hermes gateway address, defaulting to `http://127.0.0.1:8642`
+- **API key / bearer token**: only needed if Hermes expects `API_SERVER_KEY`
+- **Provider / model / base URL**: loaded from Hermes runtime config and optionally applied back
+- **Include page context**: adds page title, URL, language, and visible text excerpt to messages
+- **Use Hermes session API**: keeps the conversation in Hermes when supported
+- **Stream responses**: used on the OpenAI-compatible fallback path
 - **System prompt**: default instruction sent with conversations
+- **Reset to defaults**: clears local settings and cached conversation data
 
-## Hermes API use
+## API behavior
 
-The extension prefers:
+Preferred endpoint:
 
 ```text
 /api/sessions/{id}/chat/stream
 ```
 
-It falls back to:
+Fallback endpoint:
 
 ```text
 /v1/chat/completions
 ```
 
-The extension also reads:
+Additional reads:
 
 ```text
 /api/config
@@ -55,25 +62,20 @@ The extension also reads:
 
 ## Slash commands
 
-Type `/` in the chat input to open the command palette.
+Type `/` in the input to open the command palette.
 
-Navigation:
-
-- `ArrowUp` / `ArrowDown`: move selection
-- `Tab` or `Enter`: accept selected command
-- Mouse wheel / trackpad: scroll command list
-- `Escape`: close palette
-- `//`: send a literal message that starts with `/`
+- `ArrowUp` / `ArrowDown` moves selection
+- `Tab` or `Enter` accepts the selected command
+- `Escape` closes the palette
+- `//` sends a literal message starting with `/`
 
 ## Privacy
 
-- Talks to localhost by default
+- Talks to loopback addresses by default
 - Stores settings and chat cache in `chrome.storage.local`
-- Does not bundle telemetry, analytics, or external network calls
+- Does not include telemetry, analytics, or remote third-party calls
 
 ## Development
-
-Useful checks:
 
 ```bash
 node --check background.js
@@ -81,6 +83,14 @@ node --check sidepanel.js
 node --check options.js
 python3 -m json.tool manifest.json >/dev/null
 ```
+
+## Troubleshooting
+
+- If the panel loads but will not connect, verify Hermes is reachable at the configured gateway URL.
+- If auto-detect misses your server, enter the gateway URL manually and rerun **Test Connection**.
+- If requests fail with auth errors, set the same token Hermes expects for `API_SERVER_KEY`.
+- If provider or model controls are empty, confirm the gateway works first, then reload runtime settings from Hermes.
+- If page-aware prompts feel noisy, disable page context and resend.
 
 ## License
 
