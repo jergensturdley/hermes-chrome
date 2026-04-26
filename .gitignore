@@ -1,0 +1,28 @@
+# OS/editor noise
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Logs and local diagnostics
+*.log
+logs/
+
+# Local env/secrets/backups
+.env
+.env.*
+.venv/
+__pycache__/
+*.pyc
+*.pem
+*.key
+*.p12
+*.bak
+*.backup
+
+# Extension/package build artifacts
+*.zip
+*.crx
+build/
+dist/
+generate_icons.py

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hermes Chrome</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <div class="header-left">
+        <span class="logo">☤</span>
+        <h1>Hermes</h1>
+      </div>
+      <div class="header-right">
+        <span id="connection-status" class="status-dot" title="Disconnected"></span>
+        <button id="btn-clear" title="Clear conversation" class="icon-btn">&#x1f5d1;</button>
+        <button id="btn-settings" title="Settings" class="icon-btn">&#9881;</button>
+      </div>
+    </header>
+
+    <div id="messages" class="messages">
+      <div id="welcome" class="welcome">
+        <div class="welcome-icon">☤</div>
+        <h2>Hermes Agent</h2>
+        <p>Chat with your local AI. All data stays on your machine.</p>
+        <div class="quick-actions">
+          <button class="quick-btn" data-msg="What can you help me with?">What can you do?</button>
+          <button class="quick-btn" data-msg="Summarize this page">Summarize this page</button>
+          <button class="quick-btn" data-msg="Show me the current system status">System status</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="input-area">
+      <div id="page-context-bar" class="page-context-bar hidden">
+        <span class="page-context-label">Page context enabled</span>
+        <button id="btn-toggle-context" class="toggle-btn">OFF</button>
+      </div>
+      <div class="input-row">
+        <textarea id="user-input" placeholder="Ask Hermes anything..." rows="1"></textarea>
+        <button id="btn-send" disabled title="Send">&#10148;</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hermes Chrome - Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <span class="logo">☤</span>
+      <h1>Hermes Chrome Settings</h1>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>Connection</h2>
+        <div class="field">
+          <label for="gateway-url">Gateway URL</label>
+          <input type="url" id="gateway-url" placeholder="http://127.0.0.1:8642">
+          <span class="hint">Your local Hermes API server. Auto-detect scans common localhost ports and health endpoints.</span>
+        </div>
+        <div class="field">
+          <label for="api-key">API key / bearer token</label>
+          <input type="password" id="api-key" placeholder="Optional; e.g. API_SERVER_KEY">
+          <span class="hint">Required if Hermes was started with API_SERVER_KEY. Stored only in chrome.storage.local.</span>
+        </div>
+        <div class="button-row">
+          <button id="btn-detect" class="btn btn-primary">Auto-detect Gateway</button>
+          <button id="btn-test" class="btn">Test Connection</button>
+        </div>
+        <span id="test-result" class="test-result"></span>
+      </section>
+
+      <section class="card">
+        <h2>Hermes Runtime</h2>
+        <div class="field-grid">
+          <div class="field">
+            <label for="provider-select">Provider</label>
+            <select id="provider-select"></select>
+          </div>
+          <div class="field">
+            <label for="model-select">Model</label>
+            <select id="model-select"></select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="base-url">Provider base URL</label>
+          <input type="url" id="base-url" placeholder="Provider default">
+          <span class="hint">Synced with Hermes <code>/api/config</code>. Leave blank for provider default.</span>
+        </div>
+        <div class="button-row">
+          <button id="btn-load-runtime" class="btn">Load from Hermes</button>
+          <button id="btn-save-runtime" class="btn btn-primary">Apply to Hermes</button>
+        </div>
+        <span id="runtime-result" class="test-result"></span>
+      </section>
+
+      <section class="card">
+        <h2>Behavior</h2>
+        <div class="field">
+          <label class="checkbox-label">
+            <input type="checkbox" id="include-page-context">
+            <span>Include page context (title + URL + visible text excerpt) in messages by default</span>
+          </label>
+          <span class="hint">When enabled, Hermes sees what page you're on when you send a message.</span>
+        </div>
+        <div class="field">
+          <label class="checkbox-label">
+            <input type="checkbox" id="use-session-api">
+            <span>Use Hermes session API for persistent native Hermes context</span>
+          </label>
+          <span class="hint">Recommended. Stores the conversation in Hermes' own session database instead of only Chrome storage.</span>
+        </div>
+        <div class="field">
+          <label class="checkbox-label">
+            <input type="checkbox" id="stream-responses">
+            <span>Stream responses when using OpenAI-compatible fallback</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>System Prompt</h2>
+        <div class="field">
+          <label for="system-prompt">Default system prompt</label>
+          <textarea id="system-prompt" rows="4" placeholder="You are a helpful AI assistant..."></textarea>
+          <span class="hint">This prompt is sent with every conversation to shape Hermes' behavior.</span>
+        </div>
+      </section>
+
+      <section class="card danger">
+        <h2>Reset</h2>
+        <p class="danger-text">Clear all local data including conversation history and settings.</p>
+        <button id="btn-reset" class="btn btn-danger">Reset to Defaults</button>
+      </section>
+    </main>
+
+    <footer>
+      <button id="btn-save" class="btn btn-primary btn-large">Save Settings</button>
+      <span id="save-status" class="save-status"></span>
+    </footer>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>
