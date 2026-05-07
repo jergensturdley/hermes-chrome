@@ -87,6 +87,7 @@ async function checkConnection() {
   if (result.ok) {
     statusDot.classList.add("connected");
     statusDot.title = "Connected to Hermes";
+    state.gatewayUrl = result.url || state.gatewayUrl;
   } else {
     const detected = await new Promise(resolve => {
       chrome.runtime.sendMessage({ type: "detect-gateway" }, resolve);
@@ -106,23 +107,21 @@ async function sendMessage() {
   let text = userInput.value.trim();
   if (!text || isLoading) return;
 
-  if (text.startsWith("/") && !text.startsWith("//")) {
-    const handled = await handleSlashCommand(text);
-    if (handled) {
-      userInput.value = "";
-      userInput.style.height = "auto";
-      btnSend.disabled = true;
-      hideCommandPalette();
-      return;
-    }
-  }
-  if (text.startsWith("//")) text = text.slice(1);
-
   isLoading = true;
   btnSend.disabled = true;
   userInput.value = "";
   userInput.style.height = "auto";
   hideCommandPalette();
+
+  if (text.startsWith("/") && !text.startsWith("//")) {
+    const handled = await handleSlashCommand(text);
+    if (handled) {
+      isLoading = false;
+      btnSend.disabled = false;
+      return;
+    }
+  }
+  if (text.startsWith("//")) text = text.slice(1);
 
   welcomeEl.style.display = "none";
 
@@ -239,6 +238,7 @@ async function handleSlashCommand(input) {
     case "/clear":
     case "/new":
       await clearConversation();
+      hideCommandPalette();
       addSystemMessage("Started a fresh Hermes Chrome session.");
       return true;
 
@@ -540,6 +540,13 @@ function hideCommandPalette() {
   if (commandPalette) commandPalette.classList.add("hidden");
 }
 
+function cleanupCommandPalette() {
+  if (commandPalette && commandPalette.parentNode) {
+    commandPalette.parentNode.removeChild(commandPalette);
+  }
+  commandPalette = null;
+}
+
 btnSend.addEventListener("click", sendMessage);
 
 userInput.addEventListener("keydown", (e) => {
@@ -613,5 +620,8 @@ btnToggleContext.addEventListener("click", async () => {
 const style = document.createElement("style");
 style.textContent = `@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }`;
 document.head.appendChild(style);
+
+// Cleanup on page unload
+window.addEventListener("beforeunload", cleanupCommandPalette);
 
 init();

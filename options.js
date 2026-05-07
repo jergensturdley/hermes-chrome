@@ -153,8 +153,26 @@ function showResult(el, msg, type) {
 }
 
 async function saveSettings(show = true) {
+  let url = gatewayUrlInput.value.trim();
+  if (!url) {
+    if (show) {
+      showResult(testResult, "Gateway URL is required", "error");
+    }
+    return;
+  }
+  
+  // Validate URL format
+  try {
+    new URL(url);
+  } catch (e) {
+    if (show) {
+      showResult(testResult, "Invalid URL format", "error");
+    }
+    return;
+  }
+  
   const data = {
-    gatewayUrl: (gatewayUrlInput.value.trim() || DEFAULTS.gatewayUrl).replace(/\/+$/, ""),
+    gatewayUrl: url.replace(/\/+$/, ""),
     apiKey: apiKeyInput.value.trim(),
     provider: providerSelect.value,
     model: modelSelect.value || DEFAULTS.model,

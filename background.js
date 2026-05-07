@@ -1,3 +1,10 @@
+const TIMEOUTS = {
+  fetchJson: 2500,
+  gatewayGet: 7000,
+  gatewayJson: 15000,
+  postChat: 120000,
+};
+
 const DEFAULTS = {
   gatewayUrl: "http://127.0.0.1:8642",
   apiKey: "",
@@ -22,7 +29,7 @@ const GATEWAY_CANDIDATES = [
   "http://localhost:8000",
   "http://127.0.0.1:8080",
   "http://localhost:8080",
-];
+].filter((url, index, self) => self.indexOf(url) === index);
 
 const HEALTH_PATHS = ["/health", "/api/health", "/v1/models"];
 
@@ -206,7 +213,7 @@ function authHeaders(apiKey = "") {
   return headers;
 }
 
-async function fetchJson(url, options = {}, timeoutMs = 2500) {
+async function fetchJson(url, options = {}, timeoutMs = TIMEOUTS.fetchJson) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -254,25 +261,27 @@ async function checkGateway(url, apiKey = "") {
 
 async function detectGateway(extraCandidates = [], apiKey = "") {
   const candidates = [...new Set([...(extraCandidates || []), ...GATEWAY_CANDIDATES].map(normalizeBaseUrl))];
-  const results = await Promise.all(candidates.map(async (url) => {
+  const results = await Promise.allSettled(candidates.map(async (url) => {
     const result = await checkGateway(url, apiKey);
     return { url, ...result };
   }));
 
-  const found = results.find(result => result.ok && looksLikeHermes(result));
+  const successfulResults = results.filter(r => r.status === "fulfilled").map(r => r.value);
+  
+  const found = successfulResults.find(result => result.ok && looksLikeHermes(result));
     
   if (found) {
     await chrome.storage.local.set({ gatewayUrl: found.url });
-    return { ok: true, selected: found.url, result: found, results };
+    return { ok: true, selected: found.url, result: found, results: successfulResults };
   }
 
-  const anyHealthy = results.find(result => result.ok);
+  const anyHealthy = successfulResults.find(result => result.ok);
   if (anyHealthy) {
     await chrome.storage.local.set({ gatewayUrl: anyHealthy.url });
-    return { ok: true, selected: anyHealthy.url, result: anyHealthy, results, warning: "Healthy local API found, but Hermes identity was not confirmed." };
+    return { ok: true, selected: anyHealthy.url, result: anyHealthy, results: successfulResults, warning: "Healthy local API found, but Hermes identity was not confirmed." };
   }
 
-  return { ok: false, error: "No local Hermes gateway found", results };
+  return { ok: false, error: "No local Hermes gateway found", results: successfulResults };
 }
 
 function looksLikeHermes(result) {
@@ -284,7 +293,7 @@ async function gatewayGet(state, path) {
   const { resp, data } = await fetchJson(`${normalizeBaseUrl(state.gatewayUrl)}${path}`, {
     method: "GET",
     headers: authHeaders(state.apiKey),
-  }, 7000);
+  }, TIMEOUTS.gatewayGet);
   if (!resp.ok) throw new Error(`Gateway returned ${resp.status}: ${JSON.stringify(data)}`);
   return data;
 }
@@ -294,7 +303,7 @@ async function gatewayJson(state, path, method, body) {
     method,
     headers: authHeaders(state.apiKey),
     body: body === undefined ? undefined : JSON.stringify(body),
-  }, 15000);
+  }, TIMEOUTS.gatewayJson);
   if (!resp.ok) throw new Error(`Gateway returned ${resp.status}: ${JSON.stringify(data)}`);
   return data;
 }
@@ -564,8 +573,10 @@ async function readHermesSessionStream(resp) {
     }
     if (!dataLines.length) return;
     try {
-      handleEvent(eventName, JSON.parse(dataLines.join("\n")));
-    } catch {
+      const jsonData = JSON.parse(dataLines.join("\n"));
+      handleEvent(eventName, jsonData);
+    } catch (err) {
+      console.warn("[hermes-chrome] Failed to parse SSE data:", dataLines.join("\n"), err);
     }
   };
 
@@ -584,7 +595,7 @@ async function readHermesSessionStream(resp) {
 
 async function postChat(endpoint, payload, apiKey) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120000);
+  const timer = setTimeout(() => controller.abort(), TIMEOUTS.postChat);
   try {
     return await fetch(endpoint, {
       method: "POST",
@@ -598,6 +609,8 @@ async function postChat(endpoint, payload, apiKey) {
 }
 
 function extractCommandApproval(value) {
+  if (!value || typeof value === "string" && !value.trim()) return null;
+  
   let obj = value;
   if (typeof value === "string") {
     let text = value.trim();

@@ -26,3 +26,16 @@ __pycache__/
 build/
 dist/
 generate_icons.py
+
+# IDE and editor files
+.idea/
+.vscode/
+*.sublime-*
+*.code-workspace
+
+# Generated icons (keep source, ignore generated)
+icons/icon*.png
+
+# Temporary files
+*.tmp
+*.temp
