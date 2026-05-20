@@ -39,3 +39,5 @@ icons/icon*.png
 # Temporary files
 *.tmp
 *.temp
+snapshots/*
+

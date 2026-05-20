@@ -208,4 +208,7 @@ btnReset.addEventListener("click", resetSettings);
 gatewayUrlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); testConnection(); } });
 document.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveSettings(true); } });
 
-loadSettings().then(loadRuntime);
+loadSettings().then(async () => {
+  const result = await chrome.runtime.sendMessage({ type: "check-gateway" });
+  if (result?.ok) loadRuntime();
+});
