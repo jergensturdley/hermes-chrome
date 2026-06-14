@@ -1,3 +1,6 @@
+// Hermes Chrome — service worker.
+// Owns the Hermes session lifecycle, HTTP I/O, and the chrome.runtime message bus.
+
 const TIMEOUTS = {
   fetchJson: 2500,
   gatewayGet: 7000,
@@ -6,7 +9,7 @@ const TIMEOUTS = {
 };
 
 const DEFAULTS = {
-  gatewayUrl: "http://127.0.0.1:8642",
+  gatewayUrl: "http://localhost:9119",
   apiKey: "",
   includePageContext: true,
   streamResponses: false,
@@ -20,18 +23,28 @@ const DEFAULTS = {
   systemPrompt: "You are Hermes Agent, a helpful local AI assistant. Be concise, accurate, and technical.",
 };
 
+// Loopback ports where Hermes (or its WebUI) commonly listens. 20128 is the
+// Hermes WebUI default; 8642 is the Python API server default. We also
+// probe a handful of other common dev-server ports.
 const GATEWAY_CANDIDATES = [
-  "http://127.0.0.1:8642",
-  "http://localhost:8642",
-  "http://127.0.0.1:9119",
   "http://localhost:9119",
-  "http://127.0.0.1:8000",
+  "http://127.0.0.1:9119",
+  "http://localhost:20128",
+  "http://localhost:8642",
+  "http://127.0.0.1:8642",
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
   "http://localhost:8000",
-  "http://127.0.0.1:8080",
+  "http://127.0.0.1:8000",
   "http://localhost:8080",
-].filter((url, index, self) => self.indexOf(url) === index);
+  "http://127.0.0.1:8080",
+];
 
-const HEALTH_PATHS = ["/health", "/api/health", "/v1/models"];
+// Order matters: /api/health is the canonical Hermes health probe and
+// also the one Hermes WebUI exposes. /v1/models is the OpenAI-compat
+// fallback when /api/health is missing or auth-gated. /health on its
+// own rarely works for Hermes, so we keep it last.
+const HEALTH_PATHS = ["/api/health", "/v1/models", "/health"];
 
 const HERMES_BUILTIN_SLASH_COMMANDS = [
   ["new", "Start a new session"], ["reset", "Alias for /new"], ["retry", "Retry the last message"],
@@ -60,7 +73,7 @@ const HERMES_BUILTIN_SLASH_COMMANDS = [
   source: "hermes",
 }));
 
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   await installLocalOriginStripRules();
   const existing = await chrome.storage.local.get(Object.keys(DEFAULTS));
   const missing = Object.fromEntries(
@@ -69,7 +82,9 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (Object.keys(missing).length) {
     await chrome.storage.local.set(missing);
   }
-  chrome.runtime.openOptionsPage();
+  if (details.reason === "install") {
+    chrome.runtime.openOptionsPage();
+  }
   console.log("[hermes-chrome] Installed/updated");
 });
 
@@ -136,7 +151,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case "send-to-hermes": {
         const state = await getState();
-        return await sendToHermes(state, msg.message, msg.pageContext);
+        return await sendToHermes(state, msg.message, msg.pageContext, { internal: false });
       }
 
       default:
@@ -160,7 +175,8 @@ chrome.action.onClicked.addListener((tab) => {
 installLocalOriginStripRules().catch(err => console.warn("[hermes-chrome] Could not install DNR rules", err));
 
 async function installLocalOriginStripRules() {
-  // Strip extension Origin for loopback Hermes requests; Hermes blocks browser origins unless CORS is configured.
+  // Strip the extension's Origin for loopback Hermes requests; Hermes blocks
+  // browser origins unless CORS is configured. Re-install is idempotent.
   if (!chrome.declarativeNetRequest?.updateDynamicRules) return;
 
   const ruleIds = [864201, 864202];
@@ -176,7 +192,7 @@ async function installLocalOriginStripRules() {
         },
         condition: {
           regexFilter: "^http://127\\.0\\.0\\.1(:[0-9]+)?/",
-          resourceTypes: ["xmlhttprequest"],
+          resourceTypes: ["xmlhttprequest", "other"],
         },
       },
       {
@@ -188,7 +204,7 @@ async function installLocalOriginStripRules() {
         },
         condition: {
           regexFilter: "^http://localhost(:[0-9]+)?/",
-          resourceTypes: ["xmlhttprequest"],
+          resourceTypes: ["xmlhttprequest", "other"],
         },
       },
     ],
@@ -207,6 +223,7 @@ function normalizeBaseUrl(url) {
 function authHeaders(apiKey = "") {
   const headers = { "Content-Type": "application/json" };
   const token = String(apiKey || "").trim();
+  console.log("[hermes-chrome] postChat auth — token present:", !!token, "starts sk-:", token.startsWith("sk-"));
   if (token && !/^optional/i.test(token) && !/^change-me/i.test(token)) {
     headers.Authorization = `Bearer ${token}`;
   }
@@ -217,10 +234,7 @@ async function fetchJson(url, options = {}, timeoutMs = TIMEOUTS.fetchJson) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const resp = await fetch(url, {
-      ...options,
-      signal: controller.signal,
-    });
+    const resp = await fetch(url, { ...options, signal: controller.signal });
     const text = await resp.text();
     let data = null;
     try { data = text ? JSON.parse(text) : null; } catch { data = { text }; }
@@ -230,24 +244,80 @@ async function fetchJson(url, options = {}, timeoutMs = TIMEOUTS.fetchJson) {
   }
 }
 
+function extractSessionToken(html) {
+  if (!html || typeof html !== "string") return null;
+  const patterns = [
+    /window\.__HERMES_SESSION_TOKEN__\s*=\s*["']([^"']+)["']/,
+    /Hermes.*?session.*?token.*?["']([A-Za-z0-9_\-\.]+)["']/i,
+    /session_token["']?\s*[:=]\s*["']([^"']+)["']/i,
+    /Bearer\s+([A-Za-z0-9_\-\.]+)/,
+  ];
+  for (const re of patterns) {
+    const match = html.match(re);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+// Attempt to extract the session token from the WebUI HTML served at baseUrl.
+// This is the Bearer token the gateway expects for /v1/chat/completions and other API calls.
+async function extractSessionTokenFromWebUI(baseUrl) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUTS.fetchJson);
+  try {
+    const resp = await fetch(baseUrl, { method: "GET", signal: controller.signal });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    return extractSessionToken(html);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function checkGateway(url, apiKey = "") {
   const baseUrl = normalizeBaseUrl(url);
   const errors = [];
+  let lastStatus = null;
+  let sessionToken = null;
 
   for (const path of HEALTH_PATHS) {
     try {
       const { resp, data } = await fetchJson(baseUrl + path, {
         method: "GET",
-        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" } : {},
       });
+      lastStatus = resp.status;
 
       if (resp.ok) {
+        // On success, also try to extract session token from WebUI HTML
+        // for future authenticated calls.
+        if (!sessionToken) {
+          sessionToken = await extractSessionTokenFromWebUI(baseUrl);
+        }
         return {
           ok: true,
           url: baseUrl,
           path,
           status: data?.status || data?.object || "ok",
           data,
+          sessionToken: sessionToken || undefined,
+        };
+      }
+      if (resp.status === 401 || resp.status === 403) {
+        // Auth required — extract session token from WebUI HTML if not already obtained
+        if (!sessionToken) {
+          sessionToken = await extractSessionTokenFromWebUI(baseUrl);
+        }
+        return {
+          ok: true,
+          authRequired: true,
+          url: baseUrl,
+          path,
+          status: resp.status,
+          data,
+          sessionToken: sessionToken || undefined,
         };
       }
       errors.push(`${path}: HTTP ${resp.status}`);
@@ -256,37 +326,142 @@ async function checkGateway(url, apiKey = "") {
     }
   }
 
-  return { ok: false, url: baseUrl, error: errors.join("; ") || "No health endpoint responded" };
+  return {
+    ok: false,
+    url: baseUrl,
+    status: lastStatus,
+    error: errors.join("; ") || "No health endpoint responded",
+  };
 }
 
 async function detectGateway(extraCandidates = [], apiKey = "") {
-  const candidates = [...new Set([...(extraCandidates || []), ...GATEWAY_CANDIDATES].map(normalizeBaseUrl))];
-  const results = await Promise.allSettled(candidates.map(async (url) => {
+  const candidates = [...new Set(
+    [...(extraCandidates || []), ...GATEWAY_CANDIDATES].map(normalizeBaseUrl)
+  )];
+
+  const probes = await Promise.allSettled(candidates.map(async (url) => {
     const result = await checkGateway(url, apiKey);
     return { url, ...result };
   }));
+  const results = probes
+    .filter(p => p.status === "fulfilled")
+    .map(p => p.value);
 
-  const successfulResults = results.filter(r => r.status === "fulfilled").map(r => r.value);
-  
-  const found = successfulResults.find(result => result.ok && looksLikeHermes(result));
-    
-  if (found) {
-    await chrome.storage.local.set({ gatewayUrl: found.url });
-    return { ok: true, selected: found.url, result: found, results: successfulResults };
+  // Prefer an explicit Hermes match. Fall back to any reachable
+  // (possibly auth-gated) endpoint so the user can fix the API key
+  // instead of seeing "no gateway found".
+  const hermesMatch = results.find(r => r.ok && looksLikeHermes(r));
+  if (hermesMatch) {
+    await chrome.storage.local.set({ gatewayUrl: hermesMatch.url });
+    // If a session token was extracted from the WebUI HTML, persist it
+    // as the apiKey — it is the Bearer token the gateway expects.
+    if (hermesMatch.sessionToken) {
+      await chrome.storage.local.set({ apiKey: hermesMatch.sessionToken });
+      console.log("[hermes-chrome] Session token auto-extracted from WebUI and saved");
+    }
+    return {
+      ok: true,
+      selected: hermesMatch.url,
+      result: hermesMatch,
+      results,
+      needsApiKey: hermesMatch.authRequired === true,
+    };
   }
 
-  const anyHealthy = successfulResults.find(result => result.ok);
-  if (anyHealthy) {
-    await chrome.storage.local.set({ gatewayUrl: anyHealthy.url });
-    return { ok: true, selected: anyHealthy.url, result: anyHealthy, results: successfulResults, warning: "Healthy local API found, but Hermes identity was not confirmed." };
+  const reachable = results.find(r => r.ok);
+  if (reachable) {
+    await chrome.storage.local.set({ gatewayUrl: reachable.url });
+    if (reachable.sessionToken) {
+      await chrome.storage.local.set({ apiKey: reachable.sessionToken });
+      console.log("[hermes-chrome] Session token auto-extracted from WebUI and saved");
+    }
+    return {
+      ok: true,
+      selected: reachable.url,
+      result: reachable,
+      results,
+      warning: "Reachable local API found, but Hermes identity was not confirmed.",
+      needsApiKey: reachable.authRequired === true,
+    };
   }
 
-  return { ok: false, error: "No local Hermes gateway found", results: successfulResults };
+  // Build a useful "what we tried" error so the user can spot the
+  // wrong port or a service that is down.
+  const tried = results
+    .map(r => `${r.url}: ${r.error || `HTTP ${r.status || "?"}`}`)
+    .slice(0, 6)
+    .join(" | ");
+  return {
+    ok: false,
+    error: tried ? `No local Hermes gateway found. Tried ${tried}` : "No local Hermes gateway found",
+    results,
+  };
+}
+function looksLikeHermes(result) {
+  const data = result.data;
+
+  // Explicit Hermes identity in the payload.
+  if (data && typeof data === "object") {
+    const id = JSON.stringify({
+      name: data.name,
+      service: data.service,
+      app: data.app,
+      server: data.server,
+    }).toLowerCase();
+    if (id.includes("hermes")) return true;
+    if (data.hermes === true) return true;
+  }
+
+  // Hermes-specific API endpoints (/api/config, /api/skills, /api/available-models).
+  if (result.path === "/api/config" || result.path === "/api/skills" || result.path === "/api/available-models") {
+    return true;
+  }
+
+  // Native Hermes API server on port 8642.
+  if (/(^|:)8642$/.test(result.url) && data?.status === "ok") return true;
+
+  // OpenAI-compat gateway on known Hermes ports (9119 WebUI, 20128 proxy).
+  const isOpenAICompat = data && typeof data === "object"
+    && data.object === "list" && Array.isArray(data.data);
+  if (isOpenAICompat && result.path === "/v1/models") return true;
+
+  return false;
 }
 
-function looksLikeHermes(result) {
-  const blob = JSON.stringify(result.data || {}).toLowerCase();
-  return result.url.includes(":8642") || blob.includes("hermes") || blob.includes("hermes-agent");
+function formatGatewayError(url, status, data) {
+  const detail = (() => {
+    if (data == null) return "";
+    if (typeof data === "string") return data;
+    try { return JSON.stringify(data); } catch { return ""; }
+  })();
+  const base = `Hermes gateway at ${url} returned ${status}`;
+  const hint = status === 401 || status === 403
+    ? " — check the API key in the extension's Options page"
+    : "";
+  return detail ? `${base}${hint}: ${detail}` : `${base}${hint}.`;
+}
+
+function formatAuthError(state) {
+  const hasKey = state.apiKey && state.apiKey.trim().length > 0;
+  const keyPreview = hasKey
+    ? `"${state.apiKey.slice(0, 4)}${"*".repeat(Math.max(0, state.apiKey.length - 4))}"`
+    : "(empty)";
+  const lines = [
+    ` Auth failed with key ${keyPreview}.`,
+    ` The extension is sending Bearer <key> in the Authorization header.`,
+    "",
+    " To fix this:",
+    " 1. Open ~/.hermes/.env and find API_SERVER_KEY=<your-key>",
+    " 2. Paste that exact value in Options → API key / bearer token",
+    " 3. If you don't use API_SERVER_KEY, start Hermes without it (remove or comment out the line)",
+    ` 4. If blank, the extension origin ${chrome.runtime.getURL("").replace(/\/$/, "")} may need to be in API_SERVER_CORS_ORIGINS`,
+  ];
+  return lines.join("\n");
+}
+
+function isAuthError(err) {
+  if (!err?.message) return false;
+  return /returned 401|returned 403|Unauthorized|Forbidden/i.test(err.message);
 }
 
 async function gatewayGet(state, path) {
@@ -294,7 +469,7 @@ async function gatewayGet(state, path) {
     method: "GET",
     headers: authHeaders(state.apiKey),
   }, TIMEOUTS.gatewayGet);
-  if (!resp.ok) throw new Error(`Gateway returned ${resp.status}: ${JSON.stringify(data)}`);
+  if (!resp.ok) throw new Error(formatGatewayError(state.gatewayUrl, resp.status, data));
   return data;
 }
 
@@ -304,7 +479,7 @@ async function gatewayJson(state, path, method, body) {
     headers: authHeaders(state.apiKey),
     body: body === undefined ? undefined : JSON.stringify(body),
   }, TIMEOUTS.gatewayJson);
-  if (!resp.ok) throw new Error(`Gateway returned ${resp.status}: ${JSON.stringify(data)}`);
+  if (!resp.ok) throw new Error(formatGatewayError(state.gatewayUrl, resp.status, data));
   return data;
 }
 
@@ -408,12 +583,15 @@ async function updateHermesConfig(state, config) {
   return data;
 }
 
-async function sendToHermes(state, message, pageContext) {
+async function sendToHermes(state, message, pageContext, options = {}) {
+  const internal = options.internal === true;
+
   if (state.useSessionApi !== false) {
     try {
-      return await sendToHermesSession(state, message, pageContext);
+      return await sendToHermesSession(state, message, pageContext, { internal });
     } catch (err) {
       console.warn("[hermes-chrome] Session API failed; falling back to chat completions", err);
+      state = await getState();
     }
   }
 
@@ -423,7 +601,8 @@ async function sendToHermes(state, message, pageContext) {
   const messages = [];
   if (state.systemPrompt) messages.push({ role: "system", content: state.systemPrompt });
 
-  for (const item of (state.conversationHistory || []).slice(-state.maxHistory)) {
+  const history = state.conversationHistory || [];
+  for (const item of history.slice(-state.maxHistory)) {
     if (item?.role && item?.content) messages.push({ role: item.role, content: item.content });
   }
 
@@ -438,20 +617,12 @@ async function sendToHermes(state, message, pageContext) {
     stream: !!state.streamResponses,
   };
 
-  let resp = await postChat(endpoint, payload, state.apiKey);
-
-  if ((resp.status === 401 || resp.status === 403) && String(state.apiKey || "").trim()) {
-    console.warn("[hermes-chrome] Authenticated request was rejected; retrying without bearer token");
-    resp = await postChat(endpoint, payload, "");
-    if (resp.ok) {
-      await chrome.storage.local.set({ apiKey: "" });
-    }
-  }
+  const resp = await postChat(endpoint, payload, state.apiKey);
 
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     const authHint = resp.status === 401 || resp.status === 403
-      ? ` Check Options → API key; clear it unless Hermes API_SERVER_KEY is configured. If the key is blank, reload the extension so it can install its local Origin-stripping rule, or add this extension origin to API_SERVER_CORS_ORIGINS and restart Hermes: ${chrome.runtime.getURL("").replace(/\/$/, "")}`
+      ? formatAuthError(state)
       : "";
     throw new Error(`Gateway returned ${resp.status}: ${body || resp.statusText}.${authHint}`);
   }
@@ -473,8 +644,16 @@ async function sendToHermes(state, message, pageContext) {
       || "";
   }
 
+  // Internal messages (e.g. approval decisions) must not pollute the visible
+  // chat history cache.
+  if (internal) {
+    return { response: responseText, raw, internal: true };
+  }
+
+  const fresh = await getState();
+  const freshHistory = fresh.conversationHistory || [];
   const newHistory = [
-    ...(state.conversationHistory || []).slice(-(state.maxHistory - 2)),
+    ...freshHistory.slice(-(fresh.maxHistory - 2)),
     { role: "user", content: message },
     { role: "assistant", content: responseText || "No response body" },
   ];
@@ -483,7 +662,8 @@ async function sendToHermes(state, message, pageContext) {
   return { response: responseText, raw };
 }
 
-async function sendToHermesSession(state, message, pageContext) {
+async function sendToHermesSession(state, message, pageContext, options = {}) {
+  const internal = options.internal === true;
   let sessionId = state.currentSessionId;
   if (!sessionId) {
     const created = await gatewayJson(state, "/api/sessions", "POST", {
@@ -508,8 +688,15 @@ async function sendToHermesSession(state, message, pageContext) {
   });
 
   const responseText = data.final_response || data.response || data.content || "";
+
+  if (internal) {
+    return { response: responseText, raw: data, sessionId, internal: true };
+  }
+
+  const fresh = await getState();
+  const freshHistory = fresh.conversationHistory || [];
   const newHistory = [
-    ...(state.conversationHistory || []).slice(-(state.maxHistory - 2)),
+    ...freshHistory.slice(-(fresh.maxHistory - 2)),
     { role: "user", content: message },
     { role: "assistant", content: responseText || "No response body" },
   ];
@@ -518,10 +705,13 @@ async function sendToHermesSession(state, message, pageContext) {
 }
 
 async function sendApprovalDecision(state, approval, approved) {
+  // Approvals piggyback on the user-message channel so the existing session
+  // keeps the assistant informed, but the message is marked internal so the
+  // chat history cache and visible transcript stay clean.
   const message = approved
     ? { type: "command_approved", command: approval.command || "" }
     : { type: "command_denied" };
-  return await sendToHermes(state, JSON.stringify(message), null);
+  return await sendToHermes(state, JSON.stringify(message), null, { internal: true });
 }
 
 async function postSessionChatStream(state, sessionId, payload) {
@@ -538,7 +728,7 @@ async function readHermesSessionStream(resp) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  let final = { content: "", final_response: "", events: [] };
+  const final = { content: "", final_response: "", events: [] };
 
   const handleEvent = (name, data) => {
     final.events.push({ event: name, data });
@@ -609,17 +799,17 @@ async function postChat(endpoint, payload, apiKey) {
 }
 
 function extractCommandApproval(value) {
-  if (!value || typeof value === "string" && !value.trim()) return null;
-  
+  if (!value || (typeof value === "string" && !value.trim())) return null;
+
   let obj = value;
   if (typeof value === "string") {
-    let text = value.trim();
+    const text = value.trim();
     const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
-    if (fenced) text = fenced[1].trim();
-    const first = text.indexOf("{");
-    const last = text.lastIndexOf("}");
-    if (first >= 0 && last > first) text = text.slice(first, last + 1);
-    try { obj = JSON.parse(text); } catch { return null; }
+    const stripped = fenced ? fenced[1].trim() : text;
+    const first = stripped.indexOf("{");
+    const last = stripped.lastIndexOf("}");
+    if (first < 0 || last <= first) return null;
+    try { obj = JSON.parse(stripped.slice(first, last + 1)); } catch { return null; }
   }
   if (!obj || typeof obj !== "object") return null;
   if (obj.type !== "command_approval" && obj.requires_approval !== true) return null;
@@ -655,6 +845,7 @@ async function readOpenAIStream(resp) {
         const json = JSON.parse(data);
         out += json.choices?.[0]?.delta?.content || json.choices?.[0]?.message?.content || "";
       } catch {
+        // Ignore unparseable SSE lines; the stream is best-effort.
       }
     }
   }

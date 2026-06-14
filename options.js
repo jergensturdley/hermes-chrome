@@ -1,3 +1,7 @@
+// Hermes Chrome — options page.
+// Single source of truth for settings; syncs to chrome.storage.local and
+// pushes runtime config back to Hermes on demand.
+
 const gatewayUrlInput = document.getElementById("gateway-url");
 const apiKeyInput = document.getElementById("api-key");
 const providerSelect = document.getElementById("provider-select");
@@ -18,7 +22,7 @@ const runtimeResult = document.getElementById("runtime-result");
 const saveStatus = document.getElementById("save-status");
 
 const DEFAULTS = {
-  gatewayUrl: "http://127.0.0.1:8642",
+  gatewayUrl: "http://localhost:9119",
   apiKey: "",
   provider: "",
   model: "hermes-agent",
@@ -34,31 +38,58 @@ async function loadSettings() {
   gatewayUrlInput.value = data.gatewayUrl;
   apiKeyInput.value = data.apiKey || "";
   baseUrlInput.value = data.baseUrl || "";
-  includePageContextInput.checked = data.includePageContext;
+  includePageContextInput.checked = data.includePageContext !== false;
   useSessionApiInput.checked = data.useSessionApi !== false;
-  streamResponsesInput.checked = data.streamResponses;
-  systemPromptInput.value = data.systemPrompt;
+  streamResponsesInput.checked = data.streamResponses === true;
+  systemPromptInput.value = data.systemPrompt || DEFAULTS.systemPrompt;
+
+  // Provider/model selects are populated by Load from Hermes; seed with the
+  // current value as a placeholder so the form is not visibly empty.
   setSelectOptions(providerSelect, data.provider ? [{ id: data.provider, label: data.provider }] : []);
-  setSelectOptions(modelSelect, [{ id: data.model || "hermes-agent", label: data.model || "hermes-agent" }]);
+  setSelectOptions(modelSelect, [{ id: data.model || DEFAULTS.model, label: data.model || DEFAULTS.model }]);
 }
 
 function setSelectOptions(select, items, selected = "") {
   select.innerHTML = "";
+  if (!items.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "—";
+    opt.disabled = true;
+    opt.selected = true;
+    select.appendChild(opt);
+    return;
+  }
   for (const item of items) {
     const opt = document.createElement("option");
     opt.value = item.id;
     opt.textContent = item.label || item.id;
     select.appendChild(opt);
   }
-  if (selected) select.value = selected;
+  if (selected && [...select.options].some(o => o.value === selected)) {
+    select.value = selected;
+  }
+}
+
+function sendRuntimeMessage(type, payload = {}) {
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage({ type, ...payload }, response => {
+      if (chrome.runtime.lastError) {
+        resolve({ error: chrome.runtime.lastError.message });
+      } else {
+        resolve(response || {});
+      }
+    });
+  });
 }
 
 async function detectGateway() {
   showResult(testResult, "Scanning localhost for Hermes gateway...", "checking");
   btnDetect.disabled = true;
   try {
-    await chrome.storage.local.set({ apiKey: apiKeyInput.value.trim() });
-    const result = await chrome.runtime.sendMessage({ type: "detect-gateway", apiKey: apiKeyInput.value.trim() });
+    await saveSettings(false);
+    const apiKey = apiKeyInput.value.trim();
+    const result = await sendRuntimeMessage("detect-gateway", { apiKey });
     if (!result.ok) {
       const details = (result.results || []).slice(0, 4).map(r => `${r.url}: ${r.error || r.status || "unknown"}`).join(" | ");
       throw new Error(`${result.error || "No gateway found"}${details ? ` — ${details}` : ""}`);
@@ -79,7 +110,7 @@ async function testConnection() {
   showResult(testResult, "Testing...", "checking");
   await chrome.storage.local.set({ gatewayUrl: url.replace(/\/+$/, ""), apiKey: apiKeyInput.value.trim() });
   try {
-    const result = await chrome.runtime.sendMessage({ type: "check-gateway" });
+    const result = await sendRuntimeMessage("check-gateway");
     if (!result.ok) throw new Error(result.error);
     showResult(testResult, `Connected via ${result.path} (status: ${result.status || "ok"})`, "success");
   } catch (err) {
@@ -91,25 +122,75 @@ async function loadRuntime() {
   showResult(runtimeResult, "Loading Hermes runtime...", "checking");
   await saveSettings(false);
   try {
-    const config = await chrome.runtime.sendMessage({ type: "get-hermes-config" });
-    if (config.error) throw new Error(config.error);
-    const available = await chrome.runtime.sendMessage({ type: "get-available-models", provider: config.provider });
+    const config = await sendRuntimeMessage("get-hermes-config");
+    if (config.error) {
+      // If /api/config 401s, this gateway may be a pure OpenAI-compatible
+      // proxy (e.g. Hermes WebUI) that doesn't expose the full config API.
+      // Fall back to loading models from /v1/models and show a note.
+      if (config.error.includes("Unauthorized") || config.error.includes("401")) {
+        await loadRuntimeOpenAICompat();
+        return;
+      }
+      throw new Error(config.error);
+    }
+    const provider = config.provider || "";
+    const available = provider
+      ? await sendRuntimeMessage("get-available-models", { provider })
+      : await sendRuntimeMessage("get-available-models");
     if (available.error) throw new Error(available.error);
 
     const providers = (available.providers || []).map(p => ({
       id: p.id,
       label: `${p.label || p.id}${p.authenticated === false ? " (not authenticated)" : ""}`,
     }));
-    if (config.provider && !providers.some(p => p.id === config.provider)) providers.unshift({ id: config.provider, label: config.provider });
-    setSelectOptions(providerSelect, providers, config.provider || available.provider || "");
+    if (provider && !providers.some(p => p.id === provider)) {
+      providers.unshift({ id: provider, label: provider });
+    }
+    setSelectOptions(providerSelect, providers, provider);
 
-    const models = (available.models || []).map(m => ({ id: m.id, label: `${m.id}${m.provider ? ` · ${m.provider}` : ""}${m.description ? ` — ${m.description}` : ""}` }));
-    if (config.model && !models.some(m => m.id === config.model)) models.unshift({ id: config.model, label: `${config.model} — current` });
-    setSelectOptions(modelSelect, models, config.model || "hermes-agent");
+    const models = (available.models || []).map(m => ({
+      id: m.id,
+      label: `${m.id}${m.provider ? ` · ${m.provider}` : ""}${m.description ? ` — ${m.description}` : ""}`,
+    }));
+    const modelId = config.model || DEFAULTS.model;
+    if (modelId && !models.some(m => m.id === modelId)) {
+      models.unshift({ id: modelId, label: `${modelId} — current` });
+    }
+    setSelectOptions(modelSelect, models, modelId);
     baseUrlInput.value = config.base_url || "";
-    showResult(runtimeResult, `Loaded ${config.provider || "provider"} / ${config.model || "model"}`, "success");
+    showResult(runtimeResult, `Loaded ${provider || "provider"} / ${modelId}`, "success");
   } catch (err) {
     showResult(runtimeResult, `Failed to load runtime: ${err.message}`, "error");
+  }
+}
+
+async function loadRuntimeOpenAICompat() {
+  // Gateway doesn't expose /api/config (e.g. Hermes WebUI-only mode).
+  // Load available models via the OpenAI /v1/models endpoint and let the
+  // user pick a model manually. Provider/base URL are not available.
+  try {
+    const url = gatewayUrlInput.value.trim().replace(/\/+$/, "");
+    const apiKey = apiKeyInput.value.trim();
+    const headers = { "Content-Type": "application/json" };
+    if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+
+    const resp = await fetch(`${url}/v1/models`, { headers });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      throw new Error(`HTTP ${resp.status}: ${body || resp.statusText}`);
+    }
+    const data = await resp.json();
+    const models = (data.data || []).map(m => ({
+      id: m.id,
+      label: `${m.id}${m.description ? ` — ${m.description}` : ""}`,
+    }));
+    if (!models.length) throw new Error("No models returned from /v1/models");
+    setSelectOptions(providerSelect, [], "");
+    setSelectOptions(modelSelect, models, models[0]?.id || "");
+    baseUrlInput.value = "";
+    showResult(runtimeResult, `OpenAI-compatible gateway — ${models.length} model(s) available. Provider/base URL not exposed by this gateway.`, "success");
+  } catch (err) {
+    showResult(runtimeResult, `Gateway is up but runtime config is unavailable: ${err.message}`, "error");
   }
 }
 
@@ -119,12 +200,17 @@ async function loadModelsForProvider() {
   showResult(runtimeResult, `Loading ${provider} models...`, "checking");
   await saveSettings(false);
   try {
-    const available = await chrome.runtime.sendMessage({ type: "get-available-models", provider });
-    if (available.error) throw new Error(available.error);
-    const models = (available.models || []).filter(m => !m.provider || m.provider === provider || m.provider === "ollama").map(m => ({
-      id: m.id,
-      label: `${m.id}${m.description ? ` — ${m.description}` : ""}`,
-    }));
+    const available = await sendRuntimeMessage("get-available-models", { provider });
+    if (available.error) {
+      if (available.error.includes("Unauthorized") || available.error.includes("401")) {
+        showResult(runtimeResult, `Gateway doesn't expose /api/available-models. Use "Load from Hermes" to load models from /v1/models instead.`, "error");
+        return;
+      }
+      throw new Error(available.error);
+    }
+    const models = (available.models || [])
+      .filter(m => !m.provider || m.provider === provider)
+      .map(m => ({ id: m.id, label: `${m.id}${m.description ? ` — ${m.description}` : ""}` }));
     setSelectOptions(modelSelect, models, models[0]?.id || "");
     showResult(runtimeResult, `Loaded ${models.length} model(s) for ${provider}`, "success");
   } catch (err) {
@@ -136,11 +222,27 @@ async function saveRuntime() {
   showResult(runtimeResult, "Applying to Hermes...", "checking");
   await saveSettings(false);
   try {
-    const result = await chrome.runtime.sendMessage({
-      type: "update-hermes-config",
-      config: { provider: providerSelect.value, model: modelSelect.value, baseUrl: baseUrlInput.value.trim() },
+    const result = await sendRuntimeMessage("update-hermes-config", {
+      config: {
+        provider: providerSelect.value,
+        model: modelSelect.value,
+        baseUrl: baseUrlInput.value.trim(),
+      },
     });
-    if (result.error) throw new Error(result.error);
+    if (result.error) {
+      // Gateway doesn't support /api/config (e.g. 9Router, OpenAI-compat proxy).
+      // Save locally so the extension uses the new model for chat requests.
+      if (result.error.includes("Unauthorized") || result.error.includes("401")) {
+        await chrome.storage.local.set({
+          model: modelSelect.value || DEFAULTS.model,
+          provider: providerSelect.value || "",
+          baseUrl: baseUrlInput.value.trim(),
+        });
+        showResult(runtimeResult, `Saved locally: ${providerSelect.value || "default"}/${modelSelect.value || DEFAULTS.model} (gateway doesn't expose /api/config)`, "success");
+        return;
+      }
+      throw new Error(result.error);
+    }
     showResult(runtimeResult, `Applied ${result.provider || providerSelect.value} / ${result.model || modelSelect.value}`, "success");
   } catch (err) {
     showResult(runtimeResult, `Failed to apply runtime: ${err.message}`, "error");
@@ -153,24 +255,19 @@ function showResult(el, msg, type) {
 }
 
 async function saveSettings(show = true) {
-  let url = gatewayUrlInput.value.trim();
+  const url = gatewayUrlInput.value.trim();
   if (!url) {
-    if (show) {
-      showResult(testResult, "Gateway URL is required", "error");
-    }
+    if (show) showResult(testResult, "Gateway URL is required", "error");
     return;
   }
-  
-  // Validate URL format
+
   try {
     new URL(url);
-  } catch (e) {
-    if (show) {
-      showResult(testResult, "Invalid URL format", "error");
-    }
+  } catch {
+    if (show) showResult(testResult, "Invalid URL format", "error");
     return;
   }
-  
+
   const data = {
     gatewayUrl: url.replace(/\/+$/, ""),
     apiKey: apiKeyInput.value.trim(),
@@ -184,9 +281,10 @@ async function saveSettings(show = true) {
   };
   await chrome.storage.local.set(data);
   if (show) {
-    saveStatus.textContent = "Saved!";
+    saveStatus.textContent = "Saved";
     saveStatus.className = "save-status success";
-    setTimeout(() => { saveStatus.textContent = ""; }, 2000);
+    clearTimeout(saveStatus._timer);
+    saveStatus._timer = setTimeout(() => { saveStatus.textContent = ""; saveStatus.className = "save-status"; }, 1800);
   }
 }
 
@@ -196,6 +294,8 @@ async function resetSettings() {
   await loadSettings();
   saveStatus.textContent = "Reset to defaults";
   saveStatus.className = "save-status success";
+  clearTimeout(saveStatus._timer);
+  saveStatus._timer = setTimeout(() => { saveStatus.textContent = ""; saveStatus.className = "save-status"; }, 1800);
 }
 
 btnDetect.addEventListener("click", detectGateway);
@@ -206,9 +306,14 @@ providerSelect.addEventListener("change", loadModelsForProvider);
 btnSave.addEventListener("click", () => saveSettings(true));
 btnReset.addEventListener("click", resetSettings);
 gatewayUrlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); testConnection(); } });
-document.addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "s") { e.preventDefault(); saveSettings(true); } });
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+    e.preventDefault();
+    saveSettings(true);
+  }
+});
 
 loadSettings().then(async () => {
-  const result = await chrome.runtime.sendMessage({ type: "check-gateway" });
+  const result = await sendRuntimeMessage("check-gateway");
   if (result?.ok) loadRuntime();
 });

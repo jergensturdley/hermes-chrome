@@ -25,7 +25,7 @@ It gives Hermes a browser-native front end: open the panel, ask a question, opti
 5. If Hermes is not on the default gateway, open settings and run **Auto-detect Gateway** or enter the URL manually.
 6. Use **Test Connection** before starting a chat.
 
-The default gateway is `http://127.0.0.1:8642`.
+The default gateway is `http://localhost:9119` (Hermes WebUI), which exposes an OpenAI-compatible `/v1/chat/completions` endpoint. If you run the Hermes Python API server separately, it defaults to `http://localhost:8642`.
 
 ## Settings
 

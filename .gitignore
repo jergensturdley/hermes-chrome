@@ -36,8 +36,8 @@ generate_icons.py
 # Generated icons (keep source, ignore generated)
 icons/icon*.png
 
-# Temporary files
+# Temporary and generated files
 *.tmp
 *.temp
-snapshots/*
+snapshots/
 
