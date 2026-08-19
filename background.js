@@ -23,9 +23,9 @@ const DEFAULTS = {
   systemPrompt: "You are Hermes Agent, a helpful local AI assistant. Be concise, accurate, and technical.",
 };
 
-// Loopback ports where Hermes (or its WebUI) commonly listens. 20128 is the
-// Hermes WebUI default; 8642 is the Python API server default. We also
-// probe a handful of other common dev-server ports.
+// Loopback ports where Hermes (or its WebUI) commonly listens. 9119 is the
+// Hermes WebUI default; 8642 is the native Hermes API server default; 20128 is
+// the local proxy default. We also probe a handful of other dev-server ports.
 const GATEWAY_CANDIDATES = [
   "http://localhost:9119",
   "http://127.0.0.1:9119",

@@ -29,7 +29,7 @@ The default gateway is `http://localhost:9119` (Hermes WebUI), which exposes an 
 
 ## Settings
 
-- **Gateway URL**: Hermes gateway address, defaulting to `http://127.0.0.1:8642`
+- **Gateway URL**: Hermes gateway address, defaulting to `http://localhost:9119`
 - **API key / bearer token**: only needed if Hermes expects `API_SERVER_KEY`
 - **Provider / model / base URL**: loaded from Hermes runtime config and optionally applied back
 - **Include page context**: adds page title, URL, language, and visible text excerpt to messages
